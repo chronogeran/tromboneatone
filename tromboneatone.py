@@ -6,21 +6,23 @@ import sounddevice as sd
 import time
 import mouse
 import math
+import time
 
 # General settings that can be changed by the user
 SAMPLE_FREQ = 44100 # sample frequency in Hz
 LOWEST_SUPPORTED_FREQUENCY = 200
 USE_INTERPOLATION = True
-POWER_THRESH = 0.1 # average amplitude cutoff for pitch detection
+POWER_THRESH = 0.08 # average amplitude cutoff for pitch detection
 CONCERT_PITCH = 440 # defining a1
-MIDDLE_OCTAVE = 4
+MIDDLE_OCTAVE = 3
 PRINT_NOTE = True
+PRINT_CB_DATA = False
 MOUSE_ACTIVE = True   #if true, mouse will move to the note
 SCREEN_WIDTH = 1920
 SCREEN_HEIGHT = 1080
 
 BLOCK_LENGTH_SECONDS = 2 / LOWEST_SUPPORTED_FREQUENCY
-BLOCK_SIZE = BLOCK_LENGTH_SECONDS * SAMPLE_FREQ #samples per window
+BLOCK_SIZE = int(BLOCK_LENGTH_SECONDS * SAMPLE_FREQ) #samples per window
 
 def getScreenPoint(frequency):
   cFreqTable= [33,65,131,262,523,1047,2093]
@@ -42,7 +44,7 @@ def getScreenPoint(frequency):
   pitchPercent = 1 - (math.log(67,frequency) - math.log(67,freqLowerRange)) / (math.log(67,freqUpperRange) - math.log(67,freqLowerRange))
   print (pitchPercent)"""
   y = int(gameHeightInputSize * pitchPercent) + topMarginSize
-  x = SCREEN_WIDTH/2+100
+  x = 400#SCREEN_WIDTH/2+100
   return x, y
 
 def inverse_lerp(a: float, b: float, value: float) -> float:
@@ -55,7 +57,7 @@ A4_FREQ = 440.0
 A4_MIDI = 69
 
 # MIDI note names (diatonic with accidentals)
-NOTE_NAMES = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B']
+NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
 def frequency_to_note_string(freq_hz: float) -> str:
   if freq_hz <= 0:
     return "Invalid frequency"
@@ -78,9 +80,9 @@ def frequency_to_note_string(freq_hz: float) -> str:
   return f"{note_name}{octave} ({sign}{cents} cents)"
 
 def findSubIndex(preIndex: int, prevSample, nextSample, crossingPoint):
-  return preIndex + USE_INTERPOLATION ? inverse_lerp(prevSample, nextSample, crossingPoint) : 1
+  return preIndex + (inverse_lerp(prevSample, nextSample, crossingPoint) if USE_INTERPOLATION else 1)
 
-def getFrequency(samples, samples_per_second):
+def getFrequency(samples, samples_per_second) -> tuple[float, float, float]:
     total = 0.0
     waveform_threshold = 0.5
 
@@ -108,26 +110,34 @@ def getFrequency(samples, samples_per_second):
     average_amplitude = total / len(samples)
     return average_amplitude, frequency, dist_samples
 
-def callback(indata, frames: int, time: CData, status):
+def callback(indata, frames: int, cbTime, status):
+
+  #start = time.perf_counter()
   if status:
     print(status)
     return
 
-  if any(indata):
-    average_amplitude, frequency = getFrequency(indata, SAMPLE_FREQ)
+  if PRINT_CB_DATA:
+    print(f"Time: {cbTime}, Frames: {frames}")
 
-    if average_amplitude < POWER_THRESH:
-      if MOUSE_ACTIVE:
-        mouse.release()
+  if any(indata):
+    mono_samples = indata[:, 0]
+    average_amplitude, frequency, dist_samples = getFrequency(mono_samples, SAMPLE_FREQ)
+
+    if average_amplitude < POWER_THRESH or frequency <= 0:
       if PRINT_NOTE:
         print(f"...{average_amplitude}")
+      if MOUSE_ACTIVE:
+        mouse.release()
     else:
+      if PRINT_NOTE:
+        print(f"{frequency_to_note_string(frequency)} {frequency} {average_amplitude} {dist_samples}")
       if MOUSE_ACTIVE:
         screenX, screenY = getScreenPoint(frequency)
         mouse.move(screenX, screenY, absolute=True)
         mouse.press()
-      if PRINT_NOTE:
-        print(f"{frequency_to_note_string(frequency)} {frequency} {average_amplitude} {dist_samples}")
+  #end = time.perf_counter()
+  #print(end - start)
 
 try:
   with sd.InputStream(channels=1, dtype='float32', callback=callback, blocksize=BLOCK_SIZE, samplerate=SAMPLE_FREQ, latency='low'):
