@@ -1,12 +1,3 @@
-'''
-Guitar tuner script based on the Harmonic Product Spectrum (HPS)
-
-MIT License
-Copyright (c) 2021 chciken
-
-Adapted into tromboneatone, a program to use your otamatone as a controller for Trombone Champ by Mcall
-'''
-
 import copy
 import os
 import numpy as np
@@ -17,42 +8,28 @@ import mouse
 import math
 
 # General settings that can be changed by the user
-SAMPLE_FREQ = 20000 # sample frequency in Hz
-BLOCK_SIZE = 300 #samples per window
+SAMPLE_FREQ = 44100 # sample frequency in Hz
+LOWEST_SUPPORTED_FREQUENCY = 200
+USE_INTERPOLATION = True
 POWER_THRESH = 0.1 # average amplitude cutoff for pitch detection
 CONCERT_PITCH = 440 # defining a1
+MIDDLE_OCTAVE = 4
 PRINT_NOTE = True
-mouseActive = True   #if true, mouse will move to the note
-screenWidth = 1920
-screenHeight = 1080
+MOUSE_ACTIVE = True   #if true, mouse will move to the note
+SCREEN_WIDTH = 1920
+SCREEN_HEIGHT = 1080
 
-ALL_NOTES = ["A","A#","B","C","C#","D","D#","E","F","F#","G","G#"]
-def find_closest_note(pitch):
-  """
-  This function finds the closest note for a given pitch
-  Parameters:
-    pitch (float): pitch given in hertz
-  Returns:
-    closest_note (str): e.g. a, g#, ..
-    closest_pitch (float): pitch of the closest note in hertz
-  """
-  i = int(np.round(np.log2(pitch/CONCERT_PITCH)*12))
-  closest_note = ALL_NOTES[i%12] + str(4 + (i + 9) // 12)
-  closest_pitch = CONCERT_PITCH*2**(i/12)
-  return closest_note, closest_pitch
+BLOCK_LENGTH_SECONDS = 2 / LOWEST_SUPPORTED_FREQUENCY
+BLOCK_SIZE = BLOCK_LENGTH_SECONDS * SAMPLE_FREQ #samples per window
 
 def getScreenPoint(frequency):
   cFreqTable= [33,65,131,262,523,1047,2093]
-  middleOctive = 4
-  freqLowerRange = cFreqTable[middleOctive-1]
-  freqMidRange = cFreqTable[middleOctive]
-  freqUpperRange = cFreqTable[middleOctive+1]
-  bottomMarginSize = 135
-  bottomMarginSizeC = 184
-  topMarginSize = 140
-  topMarginSizeC = 163
-  gameHeightInputSizeC = screenHeight - bottomMarginSizeC - topMarginSizeC
-  gameHeightInputSize = screenHeight - bottomMarginSize - topMarginSize
+  freqLowerRange = cFreqTable[MIDDLE_OCTAVE-1]
+  freqMidRange = cFreqTable[MIDDLE_OCTAVE]
+  freqUpperRange = cFreqTable[MIDDLE_OCTAVE+1]
+  bottomMarginSize = 184
+  topMarginSize = 163
+  gameHeightInputSize = SCREEN_HEIGHT - bottomMarginSize - topMarginSize
 
   if frequency > freqMidRange:
       pitchPercent = (math.log(frequency) - math.log(freqMidRange)) / (math.log(freqUpperRange) - math.log(freqMidRange))
@@ -62,17 +39,16 @@ def getScreenPoint(frequency):
       pitchPercent = 1 - pitchPercent * 0.5
       
   """ Less Accurate
-  pitchPercent = (math.log(67,frequency) - math.log(67,freqLowerRange)) / (math.log(67,freqUpperRange) - math.log(67,freqLowerRange))
-  pitchPercent = 1 - pitchPercent
+  pitchPercent = 1 - (math.log(67,frequency) - math.log(67,freqLowerRange)) / (math.log(67,freqUpperRange) - math.log(67,freqLowerRange))
   print (pitchPercent)"""
-  y = int(gameHeightInputSizeC * pitchPercent) + topMarginSizeC
-  x = screenWidth/2+100
+  y = int(gameHeightInputSize * pitchPercent) + topMarginSize
+  x = SCREEN_WIDTH/2+100
   return x, y
 
 def inverse_lerp(a: float, b: float, value: float) -> float:
-    if a == b:
-        return 0.0  # Avoid division by zero
-    return (value - a) / (b - a)
+  if a == b:
+    return 0.0  # Avoid division by zero
+  return (value - a) / (b - a)
 
 # Reference: A4 = 440 Hz
 A4_FREQ = 440.0
@@ -80,7 +56,6 @@ A4_MIDI = 69
 
 # MIDI note names (diatonic with accidentals)
 NOTE_NAMES = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B']
-
 def frequency_to_note_string(freq_hz: float) -> str:
   if freq_hz <= 0:
     return "Invalid frequency"
@@ -102,17 +77,16 @@ def frequency_to_note_string(freq_hz: float) -> str:
   sign = '+' if cents >= 0 else ''
   return f"{note_name}{octave} ({sign}{cents} cents)"
 
-def findSubIndex(preIndex, prevSample, nextSample, crossingPoint):
-  return preIndex + 1#preIndex + inverse_lerp(prevSample, nextSample, crossingPoint)
+def findSubIndex(preIndex: int, prevSample, nextSample, crossingPoint):
+  return preIndex + USE_INTERPOLATION ? inverse_lerp(prevSample, nextSample, crossingPoint) : 1
 
 def getFrequency(samples, samples_per_second):
     total = 0.0
-    negative = False
     waveform_threshold = 0.5
 
     first_cross_index = -1
-    second_cross_index = -1
     third_cross_index = -1
+    dist_samples = 0
 
     prevSample = -2
     for i, sample in enumerate(samples):
@@ -126,36 +100,37 @@ def getFrequency(samples, samples_per_second):
       prevSample = sample
 
     if third_cross_index < 0:
-        frequency = 0.0  # Not enough zero crossings to estimate frequency
+      frequency = 0.0
     else:
-        frequency = 1.0 / ((third_cross_index - first_cross_index) / samples_per_second)
+      dist_samples = (third_cross_index - first_cross_index)
+      frequency = 1.0 / (dist_samples / samples_per_second)
 
     average_amplitude = total / len(samples)
-    return average_amplitude, frequency
+    return average_amplitude, frequency, dist_samples
 
-def callback(indata, frames, time, status):
+def callback(indata, frames: int, time: CData, status):
   if status:
     print(status)
     return
 
   if any(indata):
-    average_amplitude, max_freq = getFrequency(indata, SAMPLE_FREQ)
+    average_amplitude, frequency = getFrequency(indata, SAMPLE_FREQ)
 
     if average_amplitude < POWER_THRESH:
-      if mouseActive:
+      if MOUSE_ACTIVE:
         mouse.release()
       if PRINT_NOTE:
         print(f"...{average_amplitude}")
     else:
-      if mouseActive:
-        screenX, screenY = getScreenPoint(max_freq)
+      if MOUSE_ACTIVE:
+        screenX, screenY = getScreenPoint(frequency)
         mouse.move(screenX, screenY, absolute=True)
         mouse.press()
       if PRINT_NOTE:
-        print(f"{frequency_to_note_string(max_freq)} {max_freq} {average_amplitude}")
+        print(f"{frequency_to_note_string(frequency)} {frequency} {average_amplitude} {dist_samples}")
 
 try:
-  with sd.InputStream(channels=1, callback=callback, blocksize=BLOCK_SIZE, samplerate=SAMPLE_FREQ):
+  with sd.InputStream(channels=1, dtype='float32', callback=callback, blocksize=BLOCK_SIZE, samplerate=SAMPLE_FREQ, latency='low'):
     while True:
       time.sleep(0.5)
 except Exception as exc:
