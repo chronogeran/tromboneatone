@@ -7,14 +7,14 @@ import time
 import mouse
 import math
 import time
+import threading
 
 # General settings that can be changed by the user
 SAMPLE_FREQ = 44100 # sample frequency in Hz
 LOWEST_SUPPORTED_FREQUENCY = 200
 USE_INTERPOLATION = True
 POWER_THRESH = 0.08 # average amplitude cutoff for pitch detection
-CONCERT_PITCH = 440 # defining a1
-MIDDLE_OCTAVE = 3
+MIDDLE_OCTAVE = 4
 PRINT_NOTE = True
 PRINT_CB_DATA = False
 MOUSE_ACTIVE = True   #if true, mouse will move to the note
@@ -23,26 +23,27 @@ SCREEN_HEIGHT = 1080
 
 BLOCK_LENGTH_SECONDS = 2 / LOWEST_SUPPORTED_FREQUENCY
 BLOCK_SIZE = int(BLOCK_LENGTH_SECONDS * SAMPLE_FREQ) #samples per window
+MAX_FREQUENCY = 4500
 
-def getScreenPoint(frequency):
-  cFreqTable= [33,65,131,262,523,1047,2093]
-  freqLowerRange = cFreqTable[MIDDLE_OCTAVE-1]
-  freqMidRange = cFreqTable[MIDDLE_OCTAVE]
-  freqUpperRange = cFreqTable[MIDDLE_OCTAVE+1]
-  bottomMarginSize = 184
+cFreqTable= [33,65,131,262,523,1047,2093]
+logFreqLowerRange = math.log(cFreqTable[MIDDLE_OCTAVE-1])
+freqMidRange = cFreqTable[MIDDLE_OCTAVE]
+logFreqMidRange = math.log(freqMidRange)
+logFreqUpperRange = math.log(cFreqTable[MIDDLE_OCTAVE+1])
+# 0 = high, 1 = low
+def getPitchTrombonePercent(frequency) -> float:
+  if frequency > freqMidRange:
+    pitchPercent = (math.log(frequency) - logFreqMidRange) / (logFreqUpperRange - logFreqMidRange)
+    pitchPercent = 1 - (pitchPercent * 0.5 + 0.5)
+  else:
+    pitchPercent = (math.log(frequency) - logFreqLowerRange) / (logFreqMidRange - logFreqLowerRange)
+    pitchPercent = 1 - pitchPercent * 0.5
+  return np.clip(pitchPercent, 0, 1)
+
+def getScreenPoint(pitchPercent):
+  bottomMarginSize = 184 # TODO proportional to resolution
   topMarginSize = 163
   gameHeightInputSize = SCREEN_HEIGHT - bottomMarginSize - topMarginSize
-
-  if frequency > freqMidRange:
-      pitchPercent = (math.log(frequency) - math.log(freqMidRange)) / (math.log(freqUpperRange) - math.log(freqMidRange))
-      pitchPercent = 1 - (pitchPercent * 0.5 + 0.5)
-  else:
-      pitchPercent = (math.log(frequency) - math.log(freqLowerRange)) / (math.log(freqMidRange) - math.log(freqLowerRange))
-      pitchPercent = 1 - pitchPercent * 0.5
-      
-  """ Less Accurate
-  pitchPercent = 1 - (math.log(67,frequency) - math.log(67,freqLowerRange)) / (math.log(67,freqUpperRange) - math.log(67,freqLowerRange))
-  print (pitchPercent)"""
   y = int(gameHeightInputSize * pitchPercent) + topMarginSize
   x = 400#SCREEN_WIDTH/2+100
   return x, y
@@ -52,12 +53,10 @@ def inverse_lerp(a: float, b: float, value: float) -> float:
     return 0.0  # Avoid division by zero
   return (value - a) / (b - a)
 
-# Reference: A4 = 440 Hz
 A4_FREQ = 440.0
 A4_MIDI = 69
-
 # MIDI note names (diatonic with accidentals)
-NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+NOTE_NAMES = ['C ', 'C#', 'D ', 'D#', 'E ', 'F ', 'F#', 'G ', 'G#', 'A ', 'A#', 'B ']
 def frequency_to_note_string(freq_hz: float) -> str:
   if freq_hz <= 0:
     return "Invalid frequency"
@@ -110,7 +109,28 @@ def getFrequency(samples, samples_per_second) -> tuple[float, float, float]:
     average_amplitude = total / len(samples)
     return average_amplitude, frequency, dist_samples
 
+mouseDown = False
+screenX = 0
+screenY = 0
+mouseDone = False
+
+def mouseThreadLoop():
+  mouseIsDown = False
+  while not mouseDone:
+    if mouseDown:
+      mouse.move(screenX, screenY, absolute=True)
+      mouse.press()
+      mouseIsDown = True
+    elif mouseIsDown:
+      mouse.release()
+      mouseIsDown = False
+    time.sleep(0.001)
+  print("Mouse done!")
+
 def callback(indata, frames: int, cbTime, status):
+  global mouseDown
+  global screenX
+  global screenY
 
   #start = time.perf_counter()
   if status:
@@ -124,24 +144,31 @@ def callback(indata, frames: int, cbTime, status):
     mono_samples = indata[:, 0]
     average_amplitude, frequency, dist_samples = getFrequency(mono_samples, SAMPLE_FREQ)
 
-    if average_amplitude < POWER_THRESH or frequency <= 0:
+    if average_amplitude < POWER_THRESH or frequency < LOWEST_SUPPORTED_FREQUENCY * 0.5 or frequency > MAX_FREQUENCY:
       if PRINT_NOTE:
-        print(f"...{average_amplitude}")
-      if MOUSE_ACTIVE:
-        mouse.release()
+        print(f"...{average_amplitude:.4f}")
+      mouseDown = False
     else:
+      pitchPercent = getPitchTrombonePercent(frequency)
       if PRINT_NOTE:
-        print(f"{frequency_to_note_string(frequency)} {frequency} {average_amplitude} {dist_samples}")
-      if MOUSE_ACTIVE:
-        screenX, screenY = getScreenPoint(frequency)
-        mouse.move(screenX, screenY, absolute=True)
-        mouse.press()
+        print(f"{frequency_to_note_string(frequency)} FR:{frequency:.4f} AMP:{average_amplitude:.2f} DIST:{dist_samples:.2f} %:{pitchPercent:.2f}")
+      screenX, screenY = getScreenPoint(pitchPercent)
+      mouseDown = True
+
   #end = time.perf_counter()
-  #print(end - start)
+  #print(f"TIME:{end - start:.4f}")
+
+if MOUSE_ACTIVE:
+  mouseTread = threading.Thread(target=mouseThreadLoop)
+  mouseTread.start()
 
 try:
   with sd.InputStream(channels=1, dtype='float32', callback=callback, blocksize=BLOCK_SIZE, samplerate=SAMPLE_FREQ, latency='low'):
     while True:
       time.sleep(0.5)
+except KeyboardInterrupt:
+  print("Shutdown requested")
 except Exception as exc:
   print(str(exc))
+print("Exiting")
+mouseDone = True
